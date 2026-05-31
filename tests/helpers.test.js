@@ -18,6 +18,13 @@ const {
   buildSerpUrl,
   buildSearchQuery,
 } = require('../services/anakinSerpSearch');
+const {
+  mapWireDataToCreators,
+  mapYouTubeWireToCreators,
+  scoreYouTubeVideo,
+  extractCreatorFromRecord,
+  buildDiscoveryQuery,
+} = require('../services/anakinWire');
 
 test('parseFollowerCount handles k/m/b suffixes and plain numbers', () => {
   assert.equal(parseFollowerCount('1.2M followers'), 1_200_000);
@@ -153,6 +160,77 @@ test('buildSourceBlocks prefers STRUCTURED_JSON from Anakin over huge markdown',
   assert.match(out, /STRUCTURED_JSON/);
   assert.match(out, /creator_one/);
   assert.ok(!out.includes('ZZZZZZ'));
+});
+
+test('scoreYouTubeVideo penalises meta commentary titles', () => {
+  const q = { niche: 'Fitness' };
+  const meta = scoreYouTubeVideo(
+    { title: 'Ranking Indian Fitness Influencer (10-1)', channel: 'Commentary Hub' },
+    q,
+  );
+  const creator = scoreYouTubeVideo(
+    { title: 'Full body workout at home', channel: 'Yash Sharma Fitness' },
+    q,
+  );
+  assert.ok(creator > meta);
+});
+
+test('mapYouTubeWireToCreators dedupes by channel_id', () => {
+  const wireData = {
+    data: {
+      data: [
+        {
+          channel_id: 'UCabc123',
+          channel: 'Fit Channel',
+          title: 'Best fitness tips',
+          url: 'https://www.youtube.com/watch?v=1',
+          views: '100K views',
+        },
+        {
+          channel_id: 'UCabc123',
+          channel: 'Fit Channel',
+          title: 'Another video',
+          url: 'https://www.youtube.com/watch?v=2',
+        },
+      ],
+    },
+  };
+  const creators = mapYouTubeWireToCreators(wireData, 10);
+  assert.equal(creators.length, 1);
+  assert.equal(creators[0].handle, 'UCabc123');
+  assert.equal(creators[0].platform, 'youtube');
+});
+
+test('mapWireDataToCreators extracts nested Instagram handles', () => {
+  const data = {
+    results: [
+      { username: 'fit_creator', full_name: 'Fit Creator', followers_count: 120000 },
+      { profile_url: 'https://instagram.com/yoga_guru/', follower_count: 45000 },
+    ],
+  };
+  const creators = mapWireDataToCreators(data, 10);
+  assert.equal(creators.length, 2);
+  assert.equal(creators[0].handle, 'fit_creator');
+  assert.equal(creators[1].handle, 'yoga_guru');
+});
+
+test('extractCreatorFromRecord ignores invalid handles', () => {
+  assert.equal(extractCreatorFromRecord({ username: 'p' }), null);
+  assert.equal(
+    extractCreatorFromRecord({ url: 'https://instagram.com/valid_user/' })?.handle,
+    'valid_user',
+  );
+});
+
+test('buildDiscoveryQuery joins niche, location, and audience', () => {
+  const q = buildDiscoveryQuery({
+    niche: 'Fitness',
+    location: 'Bangalore',
+    audienceType: 'Gen Z',
+  });
+  assert.match(q, /Fitness/);
+  assert.match(q, /Bangalore/);
+  assert.match(q, /instagram creators/i);
 });
 
 test('isInstagramProfileUrl recognises profile pages but not posts/reels', () => {

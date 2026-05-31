@@ -1,5 +1,20 @@
 # influenceOS-hackathon-backend
 
+## Anakin Build-a-thon — Wire / Holocron
+
+This backend is built for the **[Anakin Build-a-thon](https://anakin.io/holocron)** requirement: **discovery uses Anakin Wire (Holocron)** by default.
+
+| Setting | Default | Meaning |
+|---------|---------|---------|
+| `DISCOVERY_WIRE_REQUIRED` | `true` | No fallback to `/v1/search` or DuckDuckGo SERP |
+| `DISCOVERY_SEARCH_MODE` | `wire` | Every discovery call runs `POST /holocron/task` |
+| `ANAKIN_WIRE_ACTION_ID_YOUTUBE` | `yt_search` | YouTube video/channel search via Wire |
+| `ANAKIN_WIRE_ACTION_ID_INSTAGRAM` | `yt_search` | Instagram-oriented query via YouTube Wire + Groq extraction |
+
+Verify Wire: `npm run check:holocron`. Demo **YouTube** in the UI for direct Wire → channel results; **Instagram** uses Wire JSON + Groq for `@handle` extraction.
+
+---
+
 InfluenceOS is an AI-powered influencer discovery platform that helps brands find the right micro-influencers for their campaigns. By analyzing creator profiles, engagement, niche, audience relevance, and web data, it generates smart match scores, campaign insights, and personalized outreach messages, making influencer marketing faster and more data-driven.
 
 This repository contains the Node.js + Express API that powers the [InfluenceOS-hackathon](https://github.com/ikbal-hussain/influenceOS-hackathon) frontend.
@@ -25,10 +40,14 @@ This repository contains the Node.js + Express API that powers the [InfluenceOS-
    - `ANAKIN_API_BASE_URL` — optional, defaults to `https://api.anakin.io/v1`.
    - `GROQ_API_KEY` — required for the discovery pipeline's JSON extraction stage. Get one from the [Groq console](https://console.groq.com/).
    - `GROQ_MODEL` — optional, defaults to `llama-3.1-8b-instant` (smaller / cheaper TPM vs 70B). Override with e.g. `llama-3.3-70b-versatile` if extraction quality drops. Any Groq chat model that supports `response_format=json_object`.
+   - `ANAKIN_WIRE_ACTION_ID` — optional. Holocron / Wire `action_id` from [anakin.io/holocron](https://anakin.io/holocron). When set, `auto` mode tries Wire before search/SERP.
+   - `ANAKIN_WIRE_SEARCH_QUERY` — optional. Holocron search to auto-pick an action when `ANAKIN_WIRE_ACTION_ID` is unset (`wire` mode).
+   - `ANAKIN_WIRE_PARAMS_JSON` — optional JSON for Wire task params; supports `{{niche}}`, `{{location}}`, `{{audienceType}}`, `{{query}}`, `{{limit}}`.
    - `DISCOVERY_SEARCH_MODE` — optional, default `auto`. Selects the search backend:
-     - `auto` — try Anakin `/v1/search` first, fall back to scraping a DuckDuckGo HTML SERP via Anakin URL Scraper if Anakin's search returns 0 results or errors.
+     - `auto` — if `ANAKIN_WIRE_ACTION_ID` is set, try Wire first; else try `/v1/search`, then DuckDuckGo SERP via URL Scraper.
+     - `wire` — only Holocron Wire (`POST /holocron/task`).
      - `api` — only use Anakin `/v1/search`.
-     - `serp` — skip `/v1/search` entirely and always scrape DuckDuckGo via Anakin URL Scraper. Useful when `/v1/search` is degraded; pipeline stays 100% Anakin-powered.
+     - `serp` — only DuckDuckGo SERP via URL Scraper.
    - `DISCOVERY_SEARCH_LIMIT` — optional, default `5`. Anakin Search results fetched per query (~3 credits each).
    - `DISCOVERY_ARTICLE_SCRAPE_MAX` — optional, default `3`. Article URLs scraped with Anakin URL Scraper (~1 credit each). Set to `0` to skip and feed Groq only snippets.
    - `DISCOVERY_ANAKIN_GENERATE_JSON` — optional, default `true`. When `true`, article scrapes pass `generateJson: true` to Anakin URL Scraper so each job can return `generatedJson` (structured extraction on Anakin). Groq prompts prefer compact `STRUCTURED_JSON` over full markdown to reduce tokens per minute (TPM). Set `false` for markdown-only scrapes (previous behavior, lower Anakin extraction cost/latency).

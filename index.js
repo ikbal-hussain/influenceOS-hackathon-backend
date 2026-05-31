@@ -91,6 +91,7 @@ app.get('/', (req, res) => {
     health: '/health',
     endpoints: [
       'POST /api/v1/discovery/instagram',
+      'POST /api/v1/discovery/youtube',
       'GET /api/v1/enrichment/instagram/:username',
     ],
   });
