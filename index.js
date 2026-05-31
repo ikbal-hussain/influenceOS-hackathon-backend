@@ -36,7 +36,7 @@ const DEFAULT_ORIGINS = [
   'http://127.0.0.1:5173',
   'http://localhost:5174',
   'http://127.0.0.1:5174',
-  'https://influenceos-app.netlify.app',
+  // Add your deployed hackathon frontend via CLIENT_ORIGIN in .env (not the legacy Netlify app).
 ];
 
 /** Any Vite/webpack port on loopback (incl. `[::1]`) when the SPA calls the API on :3000 */
@@ -87,7 +87,7 @@ app.use(globalRateLimit);
 
 app.get('/', (req, res) => {
   res.json({
-    name: 'influenceos-backend',
+    name: 'influenceos-hackathon-backend',
     health: '/health',
     endpoints: [
       'POST /api/v1/discovery/instagram',
@@ -114,5 +114,5 @@ app.use((req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`Server listening on http://localhost:${PORT}`);
+  console.log(`influenceOS-hackathon-backend listening on http://localhost:${PORT}`);
 });

@@ -16,6 +16,42 @@ function parseFollowerCount(text) {
   return Math.round(num * multiplier);
 }
 
+const YT_SUBSCRIBERS_AFTER =
+  /([\d][\d.,]*)\s*([kKmMbB])?\s*subscribers\b/i;
+const YT_SUBSCRIBERS_BEFORE =
+  /\bsubscribers\b[^\d]{0,20}([\d][\d.,]*)\s*([kKmMbB])?/i;
+
+function hasViewsNear(text, index) {
+  const window = text.slice(Math.max(0, index - 45), index + 45).toLowerCase();
+  return /\bviews?\b/.test(window);
+}
+
+/**
+ * Parse YouTube channel subscriber count from scraped page markdown.
+ * Returns { count, text } — rejects matches near "views".
+ */
+function parseYouTubeSubscriberCount(text) {
+  if (!text) return { count: null, text: null };
+  const str = String(text);
+  const patterns = [YT_SUBSCRIBERS_AFTER, YT_SUBSCRIBERS_BEFORE];
+
+  for (const pattern of patterns) {
+    const re = new RegExp(pattern.source, pattern.flags + 'g');
+    let match;
+    while ((match = re.exec(str)) !== null) {
+      if (hasViewsNear(str, match.index)) continue;
+      const num = Number(match[1].replace(/,/g, ''));
+      if (!Number.isFinite(num)) continue;
+      const unit = (match[2] || '').toLowerCase();
+      const mult =
+        unit === 'k' ? 1_000 : unit === 'm' ? 1_000_000 : unit === 'b' ? 1_000_000_000 : 1;
+      return { count: Math.round(num * mult), text: match[0].trim() };
+    }
+  }
+
+  return { count: null, text: null };
+}
+
 function extractInstagramHandle(url, title) {
   const fromUrl = url && url.match(INSTAGRAM_PROFILE_REGEX);
   if (fromUrl && fromUrl[1] && !['p', 'reel', 'tv', 'explore'].includes(fromUrl[1])) {
@@ -91,6 +127,7 @@ module.exports = {
   mapAnakinResults,
   mapResultToInfluencer,
   parseFollowerCount,
+  parseYouTubeSubscriberCount,
   extractInstagramHandle,
   sortByFollowersDesc,
 };

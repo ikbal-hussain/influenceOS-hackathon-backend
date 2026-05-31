@@ -84,7 +84,7 @@ router.get('/instagram/:username', requireEnrichmentApiKey, async (req, res) => 
       return res.status(503).json({
         error: 'Live profile enrichment is not configured on the server',
         code: 'APIFY_NOT_CONFIGURED',
-        hint: 'Add APIFY_API_TOKEN to the backend .env — see InfluenceOS-backend README.',
+        hint: 'Add APIFY_API_TOKEN to the backend .env — see influenceOS-hackathon-backend README.',
       });
     }
 

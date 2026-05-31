@@ -3,9 +3,14 @@ const assert = require('node:assert/strict');
 
 const {
   parseFollowerCount,
+  parseYouTubeSubscriberCount,
   extractInstagramHandle,
   sortByFollowersDesc,
 } = require('../services/influencerMapper');
+const {
+  sanitizeCreatorForPlatform,
+  urlHostMatchesPlatform,
+} = require('../services/platformConfig');
 const {
   parseGroqResponse,
   dedupeByHandle,
@@ -231,6 +236,40 @@ test('buildDiscoveryQuery joins niche, location, and audience', () => {
   assert.match(q, /Fitness/);
   assert.match(q, /Bangalore/);
   assert.match(q, /instagram creators/i);
+});
+
+test('parseYouTubeSubscriberCount parses subscribers and rejects views context', () => {
+  assert.equal(parseYouTubeSubscriberCount('1.2M subscribers').count, 1_200_000);
+  assert.equal(parseYouTubeSubscriberCount('Subscribers\n862K').count, 862_000);
+  assert.equal(parseYouTubeSubscriberCount('100K views only').count, null);
+  assert.equal(
+    parseYouTubeSubscriberCount('About\n1.2M subscribers\nVideos').count,
+    1_200_000,
+  );
+});
+
+test('sanitizeCreatorForPlatform drops wrong-host Instagram URLs on YouTube', () => {
+  const bad = sanitizeCreatorForPlatform(
+    {
+      handle: 'creator',
+      profileUrl: 'https://instagram.com/creator/',
+      platform: 'youtube',
+    },
+    'youtube',
+  );
+  assert.equal(bad, null);
+
+  const ok = sanitizeCreatorForPlatform(
+    {
+      handle: 'UCabc',
+      channelId: 'UCabc',
+      profileUrl: 'https://www.youtube.com/channel/UCabc',
+      platform: 'youtube',
+    },
+    'youtube',
+  );
+  assert.equal(ok.platform, 'youtube');
+  assert.equal(urlHostMatchesPlatform(ok.profileUrl, 'youtube'), true);
 });
 
 test('isInstagramProfileUrl recognises profile pages but not posts/reels', () => {

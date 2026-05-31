@@ -1,7 +1,6 @@
 const crypto = require('crypto');
 const {
   searchCreatorsViaWire,
-  normalizePlatform,
   enrichYouTubeCreators,
   mapYouTubeWireToCreators,
 } = require('./anakinWire');
@@ -10,7 +9,13 @@ const { searchInstagramCreatorsViaScraper } = require('./anakinSerpSearch');
 const { scrapeArticles, isInstagramProfileUrl } = require('./anakinUrlScraper');
 const { extractCreators, getGroqModelId } = require('./groqExtractCreators');
 const { mapAnakinResults, parseFollowerCount, sortByFollowersDesc } = require('./influencerMapper');
-const { logDiscovery } = require('./discoveryLog');
+const {
+  normalizePlatform,
+  sanitizeCreatorForPlatform,
+  urlHostMatchesPlatform,
+  getPlatformConfig,
+} = require('./platformConfig');
+const { logDiscovery, createDiscoveryTrace, logPipelineStep } = require('./discoveryLog');
 
 function envInt(name, fallback) {
   const raw = process.env[name];
@@ -29,38 +34,72 @@ function makeId(seed) {
   return crypto.createHash('sha1').update(seed).digest('hex').slice(0, 16);
 }
 
+function resolveFollowerCount(creator, platform) {
+  const p = normalizePlatform(platform);
+  if (p === 'youtube') {
+    if (typeof creator.followerCount === 'number' && Number.isFinite(creator.followerCount)) {
+      return creator.followerCount;
+    }
+    return parseFollowerCount(creator.followerText) ?? null;
+  }
+  return (
+    parseFollowerCount(creator.followerText) ?? parseFollowerCount(creator.evidenceSnippet) ?? null
+  );
+}
+
 function toInfluencerRow(creator, fallbackSourceUrl, platform) {
   const p = normalizePlatform(platform || creator.platform);
+  const sanitized = sanitizeCreatorForPlatform(creator, p);
+  if (!sanitized?.handle) return null;
+
   const profileUrl =
-    creator.profileUrl ||
-    (p === 'youtube'
-      ? `https://www.youtube.com/channel/${creator.handle}`
-      : `https://instagram.com/${creator.handle}`);
-  const sourceUrl = creator.sourceUrl || fallbackSourceUrl || null;
-  const followerFromText =
-    parseFollowerCount(creator.followerText) ?? parseFollowerCount(creator.evidenceSnippet);
+    sanitized.profileUrl ||
+    (p === 'youtube' && sanitized.channelId
+      ? `https://www.youtube.com/channel/${sanitized.channelId}`
+      : p === 'youtube'
+        ? `https://www.youtube.com/@${sanitized.handle}`
+        : `https://instagram.com/${sanitized.handle}`);
+
+  if (!urlHostMatchesPlatform(profileUrl, p)) return null;
+
+  // Instagram via Wire yt_search cites YouTube/article URLs; profile is still instagram.com/{handle}.
+  let sourceUrl = sanitized.sourceUrl || fallbackSourceUrl || null;
+  if (sourceUrl && !urlHostMatchesPlatform(sourceUrl, p) && p === 'instagram') {
+    sourceUrl = null;
+  }
 
   const displayName =
-    creator.displayName ||
-    (p === 'youtube' && creator.handle && !String(creator.handle).startsWith('UC')
-      ? creator.handle
+    sanitized.displayName ||
+    (p === 'youtube' && sanitized.handle && !String(sanitized.handle).startsWith('UC')
+      ? sanitized.handle
       : null) ||
-    (p === 'youtube' ? 'YouTube creator' : `@${creator.handle}`);
+    (p === 'youtube' ? 'YouTube creator' : `@${sanitized.handle}`);
 
   return {
     id: makeId(profileUrl),
     name: displayName,
     handle:
-      p === 'youtube' && creator.handle && !String(creator.handle).startsWith('UC')
-        ? creator.handle
-        : creator.handle,
+      p === 'youtube' && sanitized.handle && !String(sanitized.handle).startsWith('UC')
+        ? sanitized.handle
+        : sanitized.handle,
     profileUrl,
     platform: p,
-    snippet: creator.evidenceSnippet || '',
+    snippet: sanitized.evidenceSnippet || '',
     sourceUrl,
-    followerCount: followerFromText,
+    followerCount: resolveFollowerCount(sanitized, p),
+    followerCountSource: sanitized.followerCountSource || null,
+    avatarUrl: sanitized.avatarUrl || null,
+    channelId: sanitized.channelId || null,
     publishedAt: null,
   };
+}
+
+function mapCreatorsToInfluencers(creators, fallbackUrl, platform) {
+  return sortByFollowersDesc(
+    creators
+      .map((c) => toInfluencerRow(c, fallbackUrl, platform))
+      .filter(Boolean),
+  );
 }
 
 function tagStage(err, stage) {
@@ -79,14 +118,14 @@ function wireRequired() {
   return envBool('DISCOVERY_WIRE_REQUIRED', true);
 }
 
-async function performSearch({ query, searchLimit }) {
+async function performSearch({ query, searchLimit, ctx }) {
   const mode = searchModeFromEnv();
   const limit = Math.min(query.limit ?? 10, searchLimit);
   const platform = normalizePlatform(query.platform);
   const mustUseWire = wireRequired() || mode === 'wire';
 
   if (mustUseWire) {
-    const r = await searchCreatorsViaWire({ ...query, platform, limit });
+    const r = await searchCreatorsViaWire({ ...query, platform, limit }, ctx);
     return { ...r, searchProvider: 'anakin-wire', wireUsed: true };
   }
 
@@ -119,7 +158,7 @@ async function performSearch({ query, searchLimit }) {
   return { ...r, searchProvider: 'serp-fallback', wireUsed: false };
 }
 
-function baseStages(searchMode, search, llm = {}) {
+function baseStages(searchMode, search, llm = {}, trace = {}) {
   return {
     searchMode,
     searchProvider: search.searchProvider,
@@ -127,6 +166,10 @@ function baseStages(searchMode, search, llm = {}) {
     wireActionId: search.actionId ?? null,
     holocronCatalog: 'wire',
     search: search.rawResults?.length ?? 0,
+    traceId: trace.traceId ?? null,
+    apisUsed: trace.apisUsed ?? [],
+    platform: trace.platform ?? null,
+    metricLabel: trace.platform ? getPlatformConfig(trace.platform).metricLabel : null,
     ...llm,
   };
 }
@@ -134,6 +177,10 @@ function baseStages(searchMode, search, llm = {}) {
 async function runDiscoveryPipeline(query) {
   const searchMode = searchModeFromEnv();
   const platform = normalizePlatform(query.platform);
+  const trace = createDiscoveryTrace();
+  const apisUsed = [];
+  const ctx = { traceId: trace.traceId, apisUsed };
+  const totalSteps = platform === 'youtube' ? 4 : 3;
   const searchLimit = envInt('DISCOVERY_SEARCH_LIMIT', 5);
   const articleScrapeMax = wireRequired()
     ? envInt('DISCOVERY_ARTICLE_SCRAPE_MAX', 0)
@@ -141,10 +188,28 @@ async function runDiscoveryPipeline(query) {
   const groqRequired = envBool('DISCOVERY_GROQ_REQUIRED', true);
   const anakinGenerateJson = envBool('DISCOVERY_ANAKIN_GENERATE_JSON', true);
   const resolvedGroqModel = getGroqModelId();
+  const traceMeta = { traceId: trace.traceId, apisUsed, platform };
+
+  logPipelineStep(trace.traceId, 1, totalSteps, 'discovery_start', {
+    platform,
+    searchMode,
+    wireRequired: wireRequired(),
+  });
 
   let search;
   try {
-    search = await performSearch({ query: { ...query, platform }, searchLimit });
+    logPipelineStep(trace.traceId, 2, totalSteps, 'wire_search_start', {
+      platform,
+      path: 'POST /v1/holocron/task',
+      actionId: getPlatformConfig(platform).wireActionId,
+    });
+    search = await performSearch({ query: { ...query, platform }, searchLimit, ctx });
+    logPipelineStep(trace.traceId, 2, totalSteps, 'wire_search_done', {
+      platform,
+      resultCount: search.rawResults?.length ?? 0,
+      wireCreators: search.wireCreators?.length ?? 0,
+      actionId: search.actionId,
+    });
   } catch (err) {
     throw tagStage(err, err.stage || 'anakin-wire');
   }
@@ -188,15 +253,27 @@ async function runDiscoveryPipeline(query) {
   let groqError = null;
   let groqMeta = null;
   try {
+    logPipelineStep(trace.traceId, 3, totalSteps, 'groq_extract_start', {
+      platform,
+      path: 'POST api.groq.com/openai/v1/chat/completions',
+    });
     const out = await extractCreators({
       query: { ...query, platform },
       searchResults: search.rawResults,
       scrapedArticles,
       wirePayload: search.wireUsed ? search.wirePayload : null,
       limit: query.limit ?? 10,
+      traceId: trace.traceId,
     });
-    groqCreators = out.creators || [];
+    groqCreators = (out.creators || [])
+      .map((c) => sanitizeCreatorForPlatform(c, platform))
+      .filter(Boolean);
     groqMeta = out.meta || null;
+    logPipelineStep(trace.traceId, 3, totalSteps, 'groq_extract_done', {
+      platform,
+      resultCount: groqCreators.length,
+      status: groqMeta?.llmInvoked ? 'ok' : 'skipped',
+    });
   } catch (err) {
     groqError = tagStage(err, 'groq');
     logDiscovery('llm_result', {
@@ -241,8 +318,17 @@ async function runDiscoveryPipeline(query) {
     const enrichMax = envInt('DISCOVERY_YOUTUBE_ENRICH_MAX', 8);
     const toEnrich = groqCreators.slice(0, enrichMax);
     try {
-      const enriched = await enrichYouTubeCreators(toEnrich, { concurrency: 2 });
+      logPipelineStep(trace.traceId, 4, totalSteps, 'youtube_enrich_start', {
+        platform,
+        path: 'POST /v1/holocron/task#yt_channel',
+        channels: toEnrich.length,
+      });
+      const enriched = await enrichYouTubeCreators(toEnrich, { concurrency: 2, ctx });
       groqCreators = [...enriched, ...groqCreators.slice(enrichMax)];
+      logPipelineStep(trace.traceId, 4, totalSteps, 'youtube_enrich_done', {
+        platform,
+        channels: toEnrich.length,
+      });
     } catch (err) {
       console.warn('[discoveryPipeline] YouTube yt_channel enrich failed:', err.message);
     }
@@ -250,13 +336,18 @@ async function runDiscoveryPipeline(query) {
 
   if (groqCreators.length > 0) {
     const fallbackUrl = search.rawResults?.[0]?.url || null;
-    const influencers = sortByFollowersDesc(
-      groqCreators.map((c) => toInfluencerRow(c, fallbackUrl, platform)),
-    );
+    const influencers = mapCreatorsToInfluencers(groqCreators, fallbackUrl, platform);
     const llm = llmStagesForResponse();
+    logPipelineStep(trace.traceId, totalSteps, totalSteps, 'pipeline_complete', {
+      platform,
+      outcome: search.wireUsed ? 'wire_groq_rows' : 'groq_rows',
+      influencerCount: influencers.length,
+    });
     logDiscovery('pipeline_complete', {
       outcome: search.wireUsed ? 'wire_groq_rows' : 'groq_rows',
       influencerCount: influencers.length,
+      traceId: trace.traceId,
+      apisUsed,
       ...llm,
     });
     return {
@@ -264,13 +355,18 @@ async function runDiscoveryPipeline(query) {
       requestId: search.requestId,
       prompt: search.prompt,
       stages: {
-        ...baseStages(searchMode, search, {
-          scrapedArticles: scrapedArticles.length,
-          anakinGenerateJson,
-          groqCreators: groqCreators.length,
-          usedFallback: false,
-          ...llm,
-        }),
+        ...baseStages(
+          searchMode,
+          search,
+          {
+            scrapedArticles: scrapedArticles.length,
+            anakinGenerateJson,
+            groqCreators: groqCreators.length,
+            usedFallback: false,
+            ...llm,
+          },
+          traceMeta,
+        ),
       },
     };
   }
@@ -291,20 +387,33 @@ async function runDiscoveryPipeline(query) {
       const enrichMax = envInt('DISCOVERY_YOUTUBE_ENRICH_MAX', 8);
       let enriched = wireRows;
       try {
-        enriched = await enrichYouTubeCreators(wireRows.slice(0, enrichMax), { concurrency: 2 });
+        logPipelineStep(trace.traceId, 4, totalSteps, 'youtube_enrich_start', {
+          platform: 'youtube',
+          path: 'POST /v1/holocron/task#yt_channel',
+          channels: Math.min(enrichMax, wireRows.length),
+        });
+        enriched = await enrichYouTubeCreators(wireRows.slice(0, enrichMax), { concurrency: 2, ctx });
         enriched = [...enriched, ...wireRows.slice(enrichMax)];
+        logPipelineStep(trace.traceId, 4, totalSteps, 'youtube_enrich_done', {
+          platform: 'youtube',
+        });
       } catch (err) {
         console.warn('[discoveryPipeline] YouTube wire fallback enrich failed:', err.message);
       }
-      fallbackInfluencers = sortByFollowersDesc(
-        enriched.map((c) => toInfluencerRow(c, c.sourceUrl, 'youtube')),
-      );
+      fallbackInfluencers = mapCreatorsToInfluencers(enriched, null, 'youtube');
     }
   }
   const llm = llmStagesForResponse();
+  logPipelineStep(trace.traceId, totalSteps, totalSteps, 'pipeline_complete', {
+    platform,
+    outcome: 'fallback_mapper',
+    influencerCount: fallbackInfluencers.length,
+  });
   logDiscovery('pipeline_complete', {
     outcome: 'fallback_mapper',
     influencerCount: fallbackInfluencers.length,
+    traceId: trace.traceId,
+    apisUsed,
     ...llm,
   });
   return {
@@ -312,13 +421,18 @@ async function runDiscoveryPipeline(query) {
     requestId: search.requestId,
     prompt: search.prompt,
     stages: {
-      ...baseStages(searchMode, search, {
-        scrapedArticles: scrapedArticles.length,
-        anakinGenerateJson,
-        groqCreators: 0,
-        usedFallback: true,
-        ...llm,
-      }),
+      ...baseStages(
+        searchMode,
+        search,
+        {
+          scrapedArticles: scrapedArticles.length,
+          anakinGenerateJson,
+          groqCreators: 0,
+          usedFallback: true,
+          ...llm,
+        },
+        traceMeta,
+      ),
     },
   };
 }

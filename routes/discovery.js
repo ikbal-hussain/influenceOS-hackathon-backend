@@ -105,7 +105,7 @@ async function runDiscovery(req, res, defaultPlatform) {
     return res.status(400).json({ error: 'Invalid request', details: errors });
   }
 
-  const platform = query.platform || defaultPlatform;
+  const platform = defaultPlatform;
 
   try {
     const { influencers, requestId, prompt, stages } = await runDiscoveryPipeline({

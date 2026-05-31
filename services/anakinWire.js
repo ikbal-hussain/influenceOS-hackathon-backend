@@ -1,4 +1,12 @@
 const axios = require('axios');
+const { parseYouTubeSubscriberCount } = require('./influencerMapper');
+const {
+  normalizePlatform,
+  getPlatformConfig,
+  urlHostMatchesPlatform,
+} = require('./platformConfig');
+const { scrapeMarkdown } = require('./anakinUrlScraper');
+const { logDiscovery } = require('./discoveryLog');
 
 const DEFAULT_BASE_URL = 'https://api.anakin.io/v1';
 const POLL_TIMEOUT_MS = 90_000;
@@ -6,15 +14,18 @@ const POLL_INTERVAL_START_MS = 1_000;
 const POLL_INTERVAL_MAX_MS = 3_000;
 const INSTAGRAM_HANDLE_REGEX = /^[A-Za-z0-9_.]{1,30}$/;
 
-/** Hackathon defaults — Holocron actions that work without dashboard auth. */
-const DEFAULT_WIRE_ACTION = {
-  youtube: 'yt_search',
-  instagram: 'yt_search',
-};
+function envBool(name, fallback) {
+  const raw = process.env[name];
+  if (raw == null || raw === '') return fallback;
+  return /^(1|true|yes|on)$/i.test(String(raw).trim());
+}
 
-function normalizePlatform(platform) {
-  const s = String(platform || 'instagram').toLowerCase().trim();
-  return s === 'youtube' ? 'youtube' : 'instagram';
+function subscriberScrapeEnabled() {
+  return envBool('DISCOVERY_YOUTUBE_SUBSCRIBER_SCRAPE', true);
+}
+
+function recordApi(apisUsed, entry) {
+  if (apisUsed && !apisUsed.includes(entry)) apisUsed.push(entry);
 }
 
 function getConfig() {
@@ -171,10 +182,10 @@ async function resolveWireActionId(query) {
     return pick.action_id;
   }
 
-  return DEFAULT_WIRE_ACTION[platform];
+  return getPlatformConfig(platform).wireActionId;
 }
 
-async function submitWireTask(actionId, params) {
+async function submitWireTask(actionId, params, ctx = {}) {
   const { apiKey, baseUrl } = getConfig();
   const response = await axios.post(
     `${baseUrl}/holocron/task`,
@@ -215,10 +226,11 @@ async function submitWireTask(actionId, params) {
     err.code = 'WIRE_TASK_FAILED';
     throw err;
   }
+  recordApi(ctx.apisUsed, `POST /v1/holocron/task#${actionId}`);
   return jobId;
 }
 
-async function fetchWireJob(jobId) {
+async function fetchWireJob(jobId, ctx = {}) {
   const { apiKey, baseUrl } = getConfig();
   const response = await axios.get(`${baseUrl}/holocron/jobs/${jobId}`, {
     headers: { 'X-API-Key': apiKey },
@@ -227,12 +239,12 @@ async function fetchWireJob(jobId) {
   return response.data;
 }
 
-async function pollWireJob(jobId, { timeoutMs = POLL_TIMEOUT_MS } = {}) {
+async function pollWireJob(jobId, { timeoutMs = POLL_TIMEOUT_MS, ctx = {} } = {}) {
   const deadline = Date.now() + timeoutMs;
   let interval = POLL_INTERVAL_START_MS;
 
   while (Date.now() < deadline) {
-    const data = await fetchWireJob(jobId);
+    const data = await fetchWireJob(jobId, ctx);
     const status = data?.status;
     if (status === 'completed') return data;
     if (status === 'failed') {
@@ -253,9 +265,18 @@ async function pollWireJob(jobId, { timeoutMs = POLL_TIMEOUT_MS } = {}) {
   throw err;
 }
 
-async function runWireAction(actionId, params) {
-  const jobId = await submitWireTask(actionId, params);
-  const result = await pollWireJob(jobId);
+async function runWireAction(actionId, params, ctx = {}) {
+  const started = Date.now();
+  const jobId = await submitWireTask(actionId, params, ctx);
+  const result = await pollWireJob(jobId, { ctx });
+  recordApi(ctx.apisUsed, `GET /v1/holocron/jobs/:id`);
+  logDiscovery('wire_job_complete', {
+    traceId: ctx.traceId,
+    actionId,
+    jobId,
+    durationMs: Date.now() - started,
+    status: result?.status,
+  });
   return {
     jobId,
     actionId,
@@ -419,13 +440,37 @@ function mapYouTubeWireToCreators(wireData, limit = 25, query = {}) {
     .map(({ _score, channelId, ...rest }) => ({ ...rest, channelId }));
 }
 
-async function enrichYouTubeChannelViaWire(channelId) {
-  const wire = await runWireAction('yt_channel', { channel_id: channelId });
+async function enrichYouTubeChannelViaWire(channelId, ctx = {}) {
+  const wire = await runWireAction('yt_channel', { channel_id: channelId }, ctx);
   const d = wire.data?.data ?? wire.data;
   if (!d || typeof d !== 'object') return null;
 
   const profileUrl = d.url || `https://www.youtube.com/channel/${channelId}`;
   const handle = parseYouTubeHandleFromUrl(profileUrl) || channelId;
+
+  let followerCount = null;
+  let followerText = null;
+  let followerCountSource = null;
+
+  if (subscriberScrapeEnabled() && profileUrl) {
+    try {
+      const scrape = await scrapeMarkdown(profileUrl, { useBrowser: true, generateJson: false });
+      recordApi(ctx.apisUsed, 'POST /v1/url-scraper#youtube_subscribers');
+      recordApi(ctx.apisUsed, 'GET /v1/url-scraper/:jobId');
+      const parsed = parseYouTubeSubscriberCount(scrape.markdown);
+      if (parsed.count != null) {
+        followerCount = parsed.count;
+        followerText = parsed.text;
+        followerCountSource = 'anakin_url_scraper';
+      }
+    } catch (err) {
+      logDiscovery('youtube_subscriber_scrape_failed', {
+        traceId: ctx.traceId,
+        channelId,
+        message: err.message,
+      });
+    }
+  }
 
   return {
     channelId,
@@ -434,13 +479,15 @@ async function enrichYouTubeChannelViaWire(channelId) {
     profileUrl,
     evidenceSnippet: String(d.description || '').replace(/\s+/g, ' ').trim().slice(0, 240),
     sourceUrl: profileUrl,
-    followerText: null,
+    followerText,
+    followerCount,
+    followerCountSource,
     platform: 'youtube',
     avatarUrl: d.avatar || null,
   };
 }
 
-async function enrichYouTubeCreators(creators, { concurrency = 3 } = {}) {
+async function enrichYouTubeCreators(creators, { concurrency = 3, ctx = {} } = {}) {
   const out = [];
   let i = 0;
   const workers = Math.min(concurrency, creators.length);
@@ -456,7 +503,7 @@ async function enrichYouTubeCreators(creators, { concurrency = 3 } = {}) {
         continue;
       }
       try {
-        const enriched = await enrichYouTubeChannelViaWire(channelId);
+        const enriched = await enrichYouTubeChannelViaWire(channelId, ctx);
         out[idx] = enriched ? { ...row, ...enriched } : row;
       } catch (err) {
         console.warn('[anakinWire] yt_channel enrich failed:', channelId, err.message);
@@ -504,11 +551,11 @@ function mapWireDataToRawResults(data, limit = 10) {
   return results.slice(0, limit);
 }
 
-async function searchCreatorsViaWire(query) {
+async function searchCreatorsViaWire(query, ctx = {}) {
   const platform = normalizePlatform(query.platform);
   const actionId = await resolveWireActionId(query);
   const params = buildWireParams(query);
-  const wire = await runWireAction(actionId, params);
+  const wire = await runWireAction(actionId, params, ctx);
   const creators = mapWireDataToCreators(wire.data, query.limit ?? 10, platform, query);
   const rawResults =
     creators.length > 0
@@ -554,5 +601,6 @@ module.exports = {
   searchCreatorsViaWire,
   searchInstagramCreatorsViaWire,
   extractCreatorFromRecord,
-  DEFAULT_WIRE_ACTION,
+  subscriberScrapeEnabled,
+  urlHostMatchesPlatform,
 };

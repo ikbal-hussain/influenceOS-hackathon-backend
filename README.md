@@ -21,6 +21,8 @@ This repository contains the Node.js + Express API that powers the [InfluenceOS-
 
 ## Setup
 
+**Not the legacy repo:** run this project (`influenceOS-hackathon-backend`), not `InfluenceOS-backend`. Both use port **3000** by default; the hackathon frontend proxies to whatever is listening there.
+
 1. Install dependencies:
 
    ```bash
@@ -35,7 +37,7 @@ This repository contains the Node.js + Express API that powers the [InfluenceOS-
    Variables:
 
    - `PORT` — default `3000`.
-   - `CLIENT_ORIGIN` — optional comma-separated **extra** origins; merged with built-ins (Netlify app URL, common Vite ports on localhost / 127.0.0.1, and **any `http://` origin whose host is loopback** — `localhost`, `127.0.0.1`, or `[::1]` — so `VITE_API_URL=http://localhost:3000` from the SPA does not hit CORS during local dev).
+   - `CLIENT_ORIGIN` — optional comma-separated **extra** origins; merged with built-ins (common Vite ports on localhost / 127.0.0.1, and **any `http://` origin whose host is loopback**).
    - `ANAKIN_API_KEY` — required for `/api/v1/discovery/*` endpoints. Get one from the [Anakin dashboard](https://anakin.io/dashboard); keys start with `ak-`.
    - `ANAKIN_API_BASE_URL` — optional, defaults to `https://api.anakin.io/v1`.
    - `GROQ_API_KEY` — required for the discovery pipeline's JSON extraction stage. Get one from the [Groq console](https://console.groq.com/).
@@ -166,18 +168,26 @@ The response includes a `stages` object (see **Observability** below). If Groq f
 
 ## Observability
 
-Discovery runs emit structured server logs via [`services/discoveryLog.js`](services/discoveryLog.js): each line is `console.log('[discovery]', <event>, JSON.stringify(fields))`. Events include `search_complete` (search path and result count), `scrape_complete` (article scrape limits and counts), `llm_attempt` / `llm_skipped` / `llm_result` from Groq extraction (resolved model and approximate `sourcesChars` on attempt; never API keys or full prompts), and `pipeline_complete` (outcome and influencer count). Use these to see whether Anakin search vs SERP scrape ran and whether influencers came from Groq or the legacy mapper.
+Discovery runs emit structured server logs via [`services/discoveryLog.js`](services/discoveryLog.js): each line is `console.log('[discovery]', <event>, JSON.stringify(fields))`. Human-readable step lines use `logPipelineStep` (grep for `STEP 1/4` in the server console). Events include `search_complete`, `scrape_complete`, `wire_job_complete`, `llm_*`, and `pipeline_complete`. Never log API keys or full prompts.
 
 The JSON response **`stages`** field is additive:
 
 | Field | Meaning |
 |--------|---------|
-| `searchMode` | Env `DISCOVERY_SEARCH_MODE`: `auto`, `api`, or `serp`. |
-| `searchProvider` | Actual path used: `anakin-search`, `serp`, or `serp-fallback`. |
+| `searchMode` | Env `DISCOVERY_SEARCH_MODE`: `auto`, `api`, `serp`, or `wire`. |
+| `searchProvider` | Actual path used: `anakin-wire`, `anakin-search`, `serp`, or `serp-fallback`. |
+| `traceId` | Short id correlating all log lines for one request. |
+| `apisUsed` | Anakin/Groq endpoints touched, e.g. `POST /v1/holocron/task#yt_search`, `POST /v1/url-scraper#youtube_subscribers`. |
+| `platform` | `instagram` or `youtube` (forced by route path). |
+| `metricLabel` | `Followers` or `Subscribers` for UI. |
 | `llmProvider` | `groq` when Groq was invoked (rows returned, empty JSON, or HTTP error); `none` when Groq was not called (e.g. no SOURCES built). |
 | `llmModel` | Resolved Groq model id when the LLM path applies; otherwise `null`. |
 | `llmStatus` | `ok`, `skipped`, or `error` (Groq attempted and failed). |
 | `usedFallback` | `true` when the snippet-only mapper was used for the returned list. |
+
+**YouTube subscribers:** after `yt_channel`, the pipeline optionally scrapes the channel URL (`DISCOVERY_YOUTUBE_SUBSCRIBER_SCRAPE=true`) and parses subscriber text from markdown — Groq/snippet guesses are not used for YouTube counts.
+
+**Platform isolation:** [`services/platformConfig.js`](services/platformConfig.js) enforces allowed profile hosts per platform. `/api/v1/discovery/youtube` always sets `platform: youtube`; Instagram Apify enrichment on the detail page runs only for Instagram rows.
 
 ### Manual smoke test
 
