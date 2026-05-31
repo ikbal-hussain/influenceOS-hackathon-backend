@@ -36,8 +36,19 @@ const DEFAULT_ORIGINS = [
   'http://127.0.0.1:5173',
   'http://localhost:5174',
   'http://127.0.0.1:5174',
-  // Add your deployed hackathon frontend via CLIENT_ORIGIN in .env (not the legacy Netlify app).
+  'https://creatorbrief.netlify.app',
 ];
+
+/** CreatorBrief on Netlify (production + branch/deploy previews). */
+function isCreatorBriefNetlifyOrigin(origin) {
+  if (!origin) return false;
+  try {
+    const host = new URL(origin).hostname.toLowerCase();
+    return host === 'creatorbrief.netlify.app' || host.endsWith('--creatorbrief.netlify.app');
+  } catch {
+    return false;
+  }
+}
 
 /** Any Vite/webpack port on loopback (incl. `[::1]`) when the SPA calls the API on :3000 */
 function isLoopbackHttpOrigin(origin) {
@@ -74,6 +85,7 @@ app.use(
     origin(origin, callback) {
       if (!origin) return callback(null, true);
       if (allowedOrigins.includes(origin)) return callback(null, true);
+      if (isCreatorBriefNetlifyOrigin(origin)) return callback(null, true);
       if (process.env.NODE_ENV !== 'production' && isLoopbackHttpOrigin(origin)) {
         return callback(null, origin);
       }
@@ -87,7 +99,7 @@ app.use(globalRateLimit);
 
 app.get('/', (req, res) => {
   res.json({
-    name: 'influenceos-hackathon-backend',
+    name: 'creatorbrief-api',
     health: '/health',
     endpoints: [
       'POST /api/v1/discovery/instagram',
