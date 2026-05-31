@@ -4,7 +4,10 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "start": "node index.js",
+    "dev": "nodemon index.js",
+    "test": "node --test tests/*.test.js",
+    "check:holocron": "node scripts/check-anakin-holocron.js"
   },
   "repository": {
     "type": "git",
@@ -16,5 +19,15 @@
   "bugs": {
     "url": "https://github.com/ikbal-hussain/influenceOS-hackathon-backend/issues"
   },
-  "homepage": "https://github.com/ikbal-hussain/influenceOS-hackathon-backend#readme"
+  "homepage": "https://github.com/ikbal-hussain/influenceOS-hackathon-backend#readme",
+  "dependencies": {
+    "apify-client": "^2.23.2",
+    "axios": "^1.16.0",
+    "cors": "^2.8.6",
+    "dotenv": "^17.4.2",
+    "express": "^5.2.1"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.14"
+  }
 }
